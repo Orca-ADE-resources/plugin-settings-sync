@@ -1,0 +1,12 @@
+{
+  "name": "orca-settings-sync",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Orca plugin: sync settings, shortcuts, plugins and UI preferences between machines through a private git repo.",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "manifestVersion": 1,
+  "id": "settings-sync",
+  "publisher": "khoa",
+  "name": "Settings Sync",
+  "version": "0.1.0",
+  "description": "Keeps Orca the same on every machine, like VS Code Settings Sync: settings, shortcuts, plugins and their approvals, UI preferences and plugin config files, through a private git repo.",
+  "engines": {
+    "orca": ">=1.4.0"
+  },
+  "pluginApi": 1,
+  "main": "worker.mjs",
+  "contributes": {
+    "commands": [
+      {
+        "id": "settings",
+        "title": "Settings Sync: Open"
+      },
+      {
+        "id": "sync-now",
+        "title": "Settings Sync: Sync Now"
+      },
+      {
+        "id": "reload",
+        "title": "Settings Sync: Reload Engine"
+      }
+    ],
+    "events": [
+      {
+        "on": "agent.status.changed"
+      },
+      {
+        "on": "worktree.created"
+      },
+      {
+        "on": "worktree.removed"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "settings",
+        "key": "Mod+Alt+S"
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "events:subscribe"
+    }
+  ]
+}

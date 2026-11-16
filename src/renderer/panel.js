@@ -354,17 +354,126 @@
     returnFocus = null;
   }
 
+  function toggle(s) {
+    if (panel) close();
+    else open(s);
+  }
+
+  // ---- status bar item: "Last sync 2m ago", click opens the panel ----
+  // Sits first in the right-hand group of Orca's status bar (before "Off", memory, terminals) and
+  // borrows the classes of the Resource Manager button there, so it looks like Orca's own items.
+  // React may re-create the bar (status bar toggled, layout change): a timer puts the item back.
+
+  const ITEM_ID = 'orca-settings-sync-statusbar';
+  const ITEM_CLASS = 'relative inline-flex items-center gap-1.5 cursor-pointer rounded px-1 py-0.5 hover:bg-accent/70';
+  const LABEL_CLASS = 'text-[11px] font-medium tabular-nums text-muted-foreground';
+  const SVG = 'http://www.w3.org/2000/svg';
+  let item = null;
+  let itemIcon = null;
+  let itemLabel = null;
+
+  function statusBarGroup() {
+    const resources = document.querySelector('button[aria-label^="Resource Manager"]');
+    if (resources?.parentElement) return resources.parentElement;
+    const usage = document.querySelector('.status-bar-usage-cluster');
+    const group = usage?.nextElementSibling?.firstElementChild;
+    return group && group.tagName === 'DIV' ? group : null;
+  }
+
+  function shortAgo(at) {
+    const s = Math.max(0, Math.round((Date.now() - at) / 1000));
+    if (s < 45) return 'just now';
+    if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m ago`;
+    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+  }
+
+  function syncIcon() {
+    // two arrows in a circle (lucide "refresh-cw"), drawn with the text colour
+    const svg = document.createElementNS(SVG, 'svg');
+    for (const [k, v] of Object.entries({ width: '12', height: '12', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })) svg.setAttribute(k, v);
+    for (const d of ['M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8', 'M21 3v5h-5', 'M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16', 'M8 16H3v5']) {
+      const p = document.createElementNS(SVG, 'path');
+      p.setAttribute('d', d);
+      svg.append(p);
+    }
+    return svg;
+  }
+
+  function makeItem(group) {
+    const sample = group.querySelector('button[aria-label^="Resource Manager"]');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.id = ITEM_ID;
+    b.className = sample?.className || ITEM_CLASS;
+    b.setAttribute('aria-label', 'Settings Sync');
+    Object.assign(b.style, { background: b.className ? '' : 'transparent', border: 'none', color: 'inherit', font: 'inherit' });
+    itemIcon = syncIcon();
+    itemLabel = document.createElement('span');
+    itemLabel.className = sample?.querySelector('span.tabular-nums')?.className || LABEL_CLASS;
+    b.append(itemIcon, itemLabel);
+    // Keep the keyboard where it was (terminal/editor), so closing the panel gives it back.
+    b.addEventListener('mousedown', (e) => e.preventDefault());
+    b.addEventListener('click', () => toggle(status));
+    return b;
+  }
+
+  function refreshItem() {
+    if (!item) return;
+    const s = status;
+    const cfg = s?.config || {};
+    let text;
+    let color = '';
+    if (!s) text = 'Settings Sync';
+    else if (!cfg.repoUrl) { text = 'Sync: set up'; color = COLORS.warn; }
+    else if (s.awaitingChoice) { text = 'Sync: choose'; color = COLORS.warn; }
+    else if (s.running) text = 'Syncing…';
+    else if (s.lastSync && !s.lastSync.ok) { text = 'Sync failed'; color = COLORS.error; }
+    else if (s.lastSync) { text = `Last sync ${shortAgo(s.lastSync.at)}`; if (s.lastSync.failed?.length) color = COLORS.warn; }
+    else text = 'Not synced yet';
+    if (itemLabel.textContent !== text) itemLabel.textContent = text;
+    itemIcon.style.color = color;
+    itemIcon.style.animation = s?.running ? 'spin 1s linear infinite' : '';
+    const ls = s?.lastSync;
+    item.title = [
+      'Settings Sync',
+      cfg.repoUrl ? `Repo: ${cfg.repoUrl}` : 'No sync repo yet',
+      cfg.machineName ? `This machine: ${cfg.machineName}` : null,
+      ls ? `Last sync: ${new Date(ls.at).toLocaleString()}${ls.ok ? ` · ↓${ls.applied.length} ↑${ls.pushed.length}` : ` · ${ls.error}`}` : null,
+      `Click to open (${SHORTCUT})`,
+    ].filter(Boolean).join('\n');
+  }
+
+  function keepItem() {
+    const group = statusBarGroup();
+    if (!group) return;
+    if (!item) item = makeItem(group);
+    if (item.parentElement !== group || group.firstElementChild !== item) group.prepend(item);
+    refreshItem();
+  }
+
+  keepItem();
+  const keeper = setInterval(keepItem, 2000);
+  send('refresh'); // get the status for the item now, not only when the panel opens
+
   window[KEY] = {
     version: VERSION,
-    update(s) { status = s; if (panel && view === 'main') render(); },
+    update(s) {
+      status = s;
+      refreshItem();
+      if (panel && view === 'main') render();
+    },
     open,
     close,
-    toggle(s) { if (panel) close(); else open(s); },
+    toggle,
     toast,
     showHistory(list) { historyList = Array.isArray(list) ? list : []; if (view === 'history') render(); },
     showPreview(p) { if (view === 'preview' && preview?.commit === p?.commit) { preview = { ...preview, ...p, loading: false }; render(); } },
-    debug: { get state() { return { open: Boolean(panel), view, status, historyList, preview }; } },
+    debug: { get state() { return { open: Boolean(panel), view, status, historyList, preview, item: item?.isConnected ? item.textContent : null }; } },
     destroy() {
+      clearInterval(keeper);
+      item?.remove();
+      item = null;
       close();
       toastBox?.remove();
       toastBox = null;

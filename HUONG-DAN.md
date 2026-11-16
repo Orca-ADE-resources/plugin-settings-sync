@@ -36,6 +36,8 @@ máy công ty thì máy nhà tự cập nhật.
 
 ## Dùng hằng ngày
 
+- Thanh trạng thái dưới đáy có nút **Last sync 2m ago** (đang sync: Syncing…, lỗi: Sync failed); bấm
+  vào để mở panel. `Ctrl+Alt+S` cũng mở.
 - Không cần làm gì: sync khi mở Orca, khi quay lại cửa sổ Orca (tối đa 1 lần/phút), mỗi 5 phút, và
   ~5 giây sau khi bạn đổi setting/phím tắt/plugin.
 - Hai máy đổi **khác** key: giữ cả hai. Đổi **cùng** key: thay đổi mới hơn thắng, panel ghi lại.

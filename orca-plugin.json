@@ -3,7 +3,7 @@
   "id": "settings-sync",
   "publisher": "khoa",
   "name": "Settings Sync",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Keeps Orca the same on every machine, like VS Code Settings Sync: settings, shortcuts, plugins and their approvals, UI preferences and plugin config files, through a private git repo.",
   "engines": {
     "orca": ">=1.4.0"

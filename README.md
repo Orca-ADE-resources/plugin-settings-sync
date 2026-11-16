@@ -13,7 +13,8 @@ the git login the machine already has.
   its own.
 - Every sync is a git commit: **History** shows them and restores any of them.
 
-Shortcut: `Ctrl+Alt+S` (`⌘⌥S` on macOS) opens the panel; commands **Settings Sync: Open / Sync Now**.
+The status bar shows **Last sync 2m ago** (or Syncing…, Sync failed); click it to open the panel.
+Also `Ctrl+Alt+S` (`⌘⌥S` on macOS) and the commands **Settings Sync: Open / Sync Now**.
 
 ## What is synced
 
@@ -127,6 +128,6 @@ Files in reading order (each file only uses the ones above it):
 | 11 | `src/install.mjs` | Worker / CLI | Bootstrap that `require`s the engine into Orca (reloads it on a new version) |
 | 12 | `scripts/sync.mjs` | Terminal | CLI |
 | 13 | `worker.mjs` | Plugin worker | Loads the engine into Orca, forwards commands |
-| 14 | `src/renderer/panel.js` | Orca window | Settings Sync panel and toasts |
+| 14 | `src/renderer/panel.js` | Orca window | Settings Sync panel, status bar item, toasts |
 | 15–18 | `test/fake-orca.cjs`, `sync.test.mjs`, `merge.test.mjs`, `panel.test.mjs` | Node / headless Edge | Fake Orca; two machines against a bare repo; merge table; panel views |
 | | `orca-plugin.json` | Orca | Manifest: commands, `Mod+Alt+S`, events that start the worker |

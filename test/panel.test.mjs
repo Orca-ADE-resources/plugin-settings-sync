@@ -20,6 +20,15 @@ const browserPath = [
 ].filter(Boolean).find((p) => fs.existsSync(p));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Orca 1.4.222's status bar, reduced to what panel.js looks for.
+const STATUS_BAR = `
+<div id="bar" style="position:fixed;left:0;right:0;bottom:0;height:24px;display:flex;align-items:center;gap:16px;font:12px sans-serif">
+  <div class="status-bar-usage-cluster" style="flex:1">14% used 3h 22m</div>
+  <div id="right"><div id="group" class="flex w-max items-center gap-3">
+    <button>Off</button>
+    <button class="relative inline-flex items-center gap-1.5 rm-class" aria-label="Resource Manager, 4 terminal sessions"><span class="text-[11px] tabular-nums rm-label">870.6 MB</span></button>
+  </div></div>
+</div>`;
 let browser;
 let ws;
 let evaluate;
@@ -59,6 +68,7 @@ before(async () => {
     return res.result.result.value;
   };
   await evaluate(`document.body.style.background = '#0a0a0a'; document.body.style.color = '#e5e5e5'; true`);
+  await evaluate(`document.body.insertAdjacentHTML('beforeend', ${JSON.stringify(STATUS_BAR)}); true`);
   const source = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'panel.js'), 'utf8').replace('__VERSION__', 'test');
   await evaluate(source + '\n;true');
 });
@@ -79,6 +89,39 @@ const base = {
   config: { repoUrl: '', branch: 'main', autoSync: true, include: { settings: true, keybindings: true, plugins: true, files: true, ui: true }, machineName: 'work' },
   lastSync: null,
 };
+
+test('status bar item: first in the right group, looks like Orca\'s items, says what the last sync did', { skip }, async () => {
+  const where = await evaluate(`(() => { const i = document.getElementById('orca-settings-sync-statusbar'); return i && { first: document.getElementById('group').firstElementChild === i, cls: i.className, label: i.querySelector('span').className }; })()`);
+  assert.ok(where?.first, 'placed before "Off"');
+  assert.match(where.cls, /rm-class/, 'borrows the Resource Manager button classes');
+  assert.match(where.label, /rm-label/);
+  assert.ok(sent.some((m) => m.op === 'refresh'), 'asks for status right away');
+  const label = () => evaluate(`document.getElementById('orca-settings-sync-statusbar').innerText.trim()`);
+  await evaluate(`window.__orcaSettingsSync.update(${S(base)}); true`);
+  assert.equal(await label(), 'Sync: set up');
+  const synced = { ...base, config: { ...base.config, repoUrl: 'git@github.com:me/s.git' }, lastSync: { ok: true, at: Date.now() - 120_000, applied: [], pushed: ['settings/a'], conflicts: [], failed: [] } };
+  await evaluate(`window.__orcaSettingsSync.update(${S(synced)}); true`);
+  assert.equal(await label(), 'Last sync 2m ago');
+  assert.match(await evaluate(`document.getElementById('orca-settings-sync-statusbar').title`), /Repo: git@github\.com:me\/s\.git/);
+  await evaluate(`window.__orcaSettingsSync.update(${S({ ...synced, running: true })}); true`);
+  assert.equal(await label(), 'Syncing…');
+  await evaluate(`window.__orcaSettingsSync.update(${S({ ...synced, lastSync: { ...synced.lastSync, ok: false, error: 'offline' } })}); true`);
+  assert.equal(await label(), 'Sync failed');
+});
+
+test('status bar item: click opens the panel, click again closes it', { skip }, async () => {
+  await evaluate(`document.getElementById('orca-settings-sync-statusbar').click(); true`);
+  assert.match(await panelText(), /Settings Sync/);
+  await evaluate(`document.getElementById('orca-settings-sync-statusbar').click(); true`);
+  assert.equal(await panelText(), null);
+});
+
+test('status bar item comes back when Orca redraws the status bar', { skip }, async () => {
+  await evaluate(`(() => { const g = document.getElementById('group'); const copy = g.cloneNode(true); copy.querySelector('#orca-settings-sync-statusbar').remove(); g.replaceWith(copy); return true; })()`);
+  assert.equal(await evaluate(`!!document.getElementById('orca-settings-sync-statusbar')`), false);
+  await sleep(2300);
+  assert.equal(await evaluate(`document.getElementById('group').firstElementChild.id`), 'orca-settings-sync-statusbar');
+});
 
 test('not set up: asks for a repo URL and saves it', { skip }, async () => {
   await evaluate(`window.__orcaSettingsSync.open(${S(base)}); true`);
@@ -166,5 +209,5 @@ test('toast shows, Esc closes the panel, destroy cleans up', { skip }, async () 
   await evaluate(`document.getElementById('orca-settings-sync-panel').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
   assert.equal(await panelText(), null);
   await evaluate(`window.__orcaSettingsSync.destroy(); true`);
-  assert.equal(await evaluate(`typeof window.__orcaSettingsSync + ':' + !!document.getElementById('orca-settings-sync-toasts')`), 'undefined:false');
+  assert.equal(await evaluate(`typeof window.__orcaSettingsSync + ':' + !!document.getElementById('orca-settings-sync-toasts') + ':' + !!document.getElementById('orca-settings-sync-statusbar')`), 'undefined:false:false');
 });

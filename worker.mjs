@@ -6,7 +6,6 @@ import { isMarked, readVersion, runInOrca } from './src/install.mjs';
 
 export default async function activate(ctx) {
   const pid = process.ppid;
-  const version = readVersion();
   const RETRY_AFTER_MS = 60_000;
   let installing = null;
   let lastFailure = 0;
@@ -23,6 +22,8 @@ export default async function activate(ctx) {
   // Called on every event; cheap once this Orca process runs the current version. After a failure
   // (e.g. another debugger holds port 9229) wait a minute instead of retrying on every event.
   const ensureInstalled = () => {
+    // Read the version every time: the folder may have been updated (by sync) while this worker runs.
+    const version = readVersion();
     if (isMarked(pid, version) || Date.now() - lastFailure < RETRY_AFTER_MS) return Promise.resolve();
     installing ??= exec(undefined)
       .then((status) => ctx.log(`settings-sync ${version} running in Orca pid ${pid} (${status.windows} window)`))

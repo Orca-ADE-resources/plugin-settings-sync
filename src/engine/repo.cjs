@@ -32,7 +32,8 @@ function readRepo(dir) {
       add(i);
     }
     if (typeof p.enabled === 'boolean') add(item(`plugin-enabled/${key}`, p.enabled));
-    if (typeof p.consent === 'string') add(item(`plugin-consent/${key}`, p.consent));
+    // { permissions, release } since 0.3; a bare Orca fingerprint (string) before
+    if (typeof p.consent === 'string' || (p.consent && typeof p.consent === 'object')) add(item(`plugin-consent/${key}`, p.consent));
   }
 
   const filesDir = path.join(dir, 'files');

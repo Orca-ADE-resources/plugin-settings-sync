@@ -7,6 +7,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { readJson, writeFileAtomic } = require('./util.cjs');
 
+function readManifest(dir) {
+  const m = readJson(path.join(dir, 'orca-plugin.json'), null);
+  return m && typeof m === 'object' && typeof m.id === 'string' ? m : null;
+}
+
 const FAKE_EVENT = Object.freeze({ sender: Object.freeze({ id: -1 }) });
 
 /**
@@ -63,9 +68,19 @@ function createOrcaOps({ ipcMain, userData, originals, BrowserWindow }) {
     },
 
     readLock: () => readJson(path.join(userData, 'plugins', 'plugins.lock.json'), {})?.plugins || {},
-    readManifest(dir) {
-      const m = readJson(path.join(dir, 'orca-plugin.json'), null);
-      return m && typeof m.publisher === 'string' && typeof m.id === 'string' ? { publisher: m.publisher, id: m.id } : null;
+    readManifest,
+    // Installed (git, marketplace, bundled) plugins: <userData>/plugins/<key>/current holds the
+    // content hash of the active copy, which lives in <userData>/plugins/<key>/<hash>/.
+    readInstalledManifest(pluginKey) {
+      const root = path.join(userData, 'plugins', pluginKey);
+      let hash;
+      try {
+        hash = fs.readFileSync(path.join(root, 'current'), 'utf8').trim();
+      } catch {
+        return null;
+      }
+      if (!/^[\w.-]+$/.test(hash)) return null;
+      return readManifest(path.join(root, hash));
     },
     listPlugins: () => invoke('plugins:list'),
     consent: (pluginKey, fingerprint) => invoke('plugins:consent', { pluginKey, reviewedFingerprint: fingerprint, decision: 'approve' }),

@@ -5,7 +5,8 @@
 // ops:
 //   getSettings() / setSettings(patch)
 //   readKeybindings() -> { path, file }      writeKeybindings(file)   (writes + reloads)
-//   readLock() -> { [pluginKey]: lockEntry }  readManifest(dir) -> { publisher, id } | null
+//   readLock() -> { [pluginKey]: lockEntry }
+//   readManifest(dir) -> manifest | null      readInstalledManifest(pluginKey) -> manifest | null  (git/marketplace/bundled)
 //   listPlugins() -> [{ pluginKey, consentFingerprint }]
 //   consent(pluginKey, fingerprint)  setEnabled(pluginKey, enabled)  refreshPlugins()
 //   installGit({ url, ref }) -> { ok, error }   installMarketplace(source) -> { ok, error }   removePlugin(pluginKey)
@@ -13,9 +14,10 @@
 //   getUi() / setUi(patch)
 const path = require('node:path');
 const {
-  settingsToItems, settingsPatch, keybindingsToItems, applyKeybindingChanges, pluginItems, uiToItems, toMap, item,
+  settingsToItems, settingsPatch, keybindingsToItems, applyKeybindingChanges, pluginItems, pluginKeyOf, approvalValue,
+  uiToItems, toMap, item,
 } = require('./items.cjs');
-const { hashTree, mirrorTree, rmrf, isInside } = require('./util.cjs');
+const { hashTree, mirrorTree, rmrf, isInside, stableStringify } = require('./util.cjs');
 
 /**
  * @param {object} ops
@@ -26,28 +28,74 @@ function createAdapter(ops, { managedDevRoot, log = () => {}, afterFileWrite = (
     const out = [];
     const seen = new Set();
     for (const dir of Array.isArray(settings.devPluginPaths) ? settings.devPluginPaths : []) {
-      const m = ops.readManifest(dir);
-      if (!m) continue;
-      const pluginKey = `${m.publisher}.${m.id}`;
-      if (seen.has(pluginKey)) continue;
+      const manifest = ops.readManifest(dir);
+      const pluginKey = pluginKeyOf(manifest);
+      if (!pluginKey || seen.has(pluginKey)) continue;
       seen.add(pluginKey);
-      out.push({ pluginKey, dir, hash: hashTree(dir), own: !isInside(dir, managedDevRoot) });
+      out.push({ pluginKey, dir, manifest, hash: hashTree(dir), own: !isInside(dir, managedDevRoot) });
     }
     return out;
   }
 
-  async function readLocal(cfg) {
+  /** The manifest of the copy installed here and, for git/marketplace/bundled plugins, its release. */
+  function installedCopy(pluginKey, lock, dev) {
+    const d = dev.find((x) => x.pluginKey === pluginKey);
+    if (d) return { manifest: d.manifest, release: null };
+    const manifest = ops.readInstalledManifest(pluginKey);
+    if (!manifest) return null;
+    return { manifest, release: lock[pluginKey]?.resolvedCommit || lock[pluginKey]?.contentHash || null };
+  }
+
+  /**
+   * Plugins approved for the copy installed now. An approval Orca asks for again only because the
+   * plugin's files changed (Orca 1.4.269 binds the approval of a dev plugin that adds shortcuts to
+   * its files) still counts when the copy asks for exactly what was approved at the last sync; a
+   * copy this engine keeps up to date (managed dev folder) is then approved again right away.
+   * @param {Record<string, string>} lastLocal  item hashes at the end of the last sync
+   */
+  async function approvals(settings, lock, dev, lastLocal) {
+    const consents = settings.pluginConsents || {};
+    let listed;
+    try {
+      listed = await ops.listPlugins();
+    } catch {
+      return [];
+    }
+    const out = [];
+    for (const p of listed) {
+      const key = p.pluginKey;
+      if (!consents[key]) continue;
+      const copy = installedCopy(key, lock, dev);
+      if (!copy) continue;
+      const value = approvalValue(copy.manifest, copy.release);
+      if (consents[key] !== p.consentFingerprint) {
+        const id = `plugin-consent/${key}`;
+        if (item(id, value).h !== lastLocal[id]) continue; // asks for something not approved yet
+        const d = dev.find((x) => x.pluginKey === key);
+        if (d && !d.own) {
+          try {
+            await ops.consent(key, p.consentFingerprint);
+            log(`approved the updated copy of ${key} (same permissions as before)`);
+          } catch (err) {
+            log(`could not approve the updated copy of ${key}: ${err.message}`);
+          }
+        }
+      }
+      out.push({ pluginKey: key, value });
+    }
+    return out;
+  }
+
+  /** @param {{ lastLocal?: Record<string, string> }} [o] */
+  async function readLocal(cfg, { lastLocal = {} } = {}) {
     const items = [];
     const settings = await ops.getSettings();
     if (cfg.include.settings) items.push(...settingsToItems(settings, cfg.excludeSettings));
     if (cfg.include.keybindings) items.push(...keybindingsToItems((await ops.readKeybindings()).file));
     if (cfg.include.plugins) {
-      items.push(...pluginItems({
-        consents: settings.pluginConsents,
-        disabled: settings.disabledPlugins,
-        lock: ops.readLock(),
-        dev: await devPlugins(settings),
-      }));
+      const lock = ops.readLock();
+      const dev = await devPlugins(settings);
+      items.push(...pluginItems({ disabled: settings.disabledPlugins, lock, dev, approvals: await approvals(settings, lock, dev, lastLocal) }));
     }
     if (cfg.include.files) {
       for (const name of cfg.extraFiles) {
@@ -70,6 +118,13 @@ function createAdapter(ops, { managedDevRoot, log = () => {}, afterFileWrite = (
       failed.set(id, { message, retry });
       log(`apply ${id} failed: ${message}`);
     };
+    // Not something the user has to act on (e.g. the plugin is not installed here): retry quietly.
+    const wait = (id, message, retry = true) => {
+      failed.set(id, { message, retry, quiet: true });
+      log(`apply ${id} waits: ${message}`);
+    };
+    let listCache = null;
+    const listed = async () => (listCache ??= await ops.listPlugins());
     const group = (prefix) => changes.filter((c) => c.id.startsWith(`${prefix}/`));
     const keyOf = (c) => c.id.slice(c.id.indexOf('/') + 1);
 
@@ -155,32 +210,55 @@ function createAdapter(ops, { managedDevRoot, log = () => {}, afterFileWrite = (
       await ops.refreshPlugins();
     }
 
-    // Approvals: only when this machine's copy asks for exactly the permissions approved elsewhere.
+    // Approvals: approve this machine's copy (with its own fingerprint) when it asks for exactly
+    // what was approved on the other machine. See approvalValue() in items.cjs.
     const consentChanges = group('plugin-consent');
     if (consentChanges.length) {
-      const list = await ops.listPlugins();
+      const list = await listed();
+      const settings = await ops.getSettings();
+      const lock = ops.readLock();
+      const dev = await devPlugins(settings);
       for (const c of consentChanges) {
         const key = keyOf(c);
         try {
           if (c.item === undefined) { skipped.add(c.id); continue; } // Orca has no "revoke"; keep this machine's choice
           const p = list.find((x) => x.pluginKey === key);
-          if (!p) throw new Error('plugin not installed here yet');
-          if (p.consentFingerprint !== c.item.value) {
-            throw new Error('this copy asks for different permissions; review it in Settings → Plugins');
+          if (!p) { wait(c.id, 'plugin not installed here yet'); continue; }
+          if (settings.pluginConsents?.[key] === p.consentFingerprint) { skipped.add(c.id); continue; } // approved here already
+          const want = c.item.value;
+          if (typeof want === 'string') {
+            // Written by Settings Sync 0.2: an Orca fingerprint, only valid for the same Orca version and folder.
+            if (want === p.consentFingerprint) await ops.consent(key, p.consentFingerprint);
+            else wait(c.id, 'approved by an older Settings Sync; waits for that machine to sync again', false);
+            continue;
           }
-          await ops.consent(key, c.item.value);
+          const copy = installedCopy(key, lock, dev);
+          if (!copy) { wait(c.id, 'cannot read the manifest of the copy installed here'); continue; }
+          const mine = approvalValue(copy.manifest, copy.release);
+          if (stableStringify(mine.permissions) !== stableStringify(want?.permissions)) {
+            throw new Error('this copy asks for different permissions than the one approved on your other machine; review it in Settings → Plugins');
+          }
+          if (want.release && mine.release !== want.release) {
+            throw new Error('this copy is a different release than the one approved on your other machine; review it in Settings → Plugins');
+          }
+          await ops.consent(key, p.consentFingerprint);
         } catch (err) {
           fail(c.id, err, true);
         }
       }
     }
 
-    for (const c of group('plugin-enabled')) {
-      try {
-        if (c.item === undefined) { skipped.add(c.id); continue; }
-        await ops.setEnabled(keyOf(c), Boolean(c.item.value));
-      } catch (err) {
-        fail(c.id, err, true);
+    const enabledChanges = group('plugin-enabled');
+    if (enabledChanges.length) {
+      const list = await listed();
+      for (const c of enabledChanges) {
+        try {
+          if (c.item === undefined) { skipped.add(c.id); continue; }
+          if (!list.some((x) => x.pluginKey === keyOf(c))) { wait(c.id, 'plugin not installed here yet'); continue; }
+          await ops.setEnabled(keyOf(c), Boolean(c.item.value));
+        } catch (err) {
+          fail(c.id, err, true);
+        }
       }
     }
 

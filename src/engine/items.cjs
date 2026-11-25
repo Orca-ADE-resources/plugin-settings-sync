@@ -7,10 +7,10 @@
 //   keybindings/<scope>/<action>   one entry of ~/.orca/keybindings.json; scope = common | win32 | darwin | linux
 //   plugin-source/<pluginKey>      where the plugin comes from: git, marketplace, or a dev folder (files in the repo)
 //   plugin-enabled/<pluginKey>     on/off
-//   plugin-consent/<pluginKey>     the permission fingerprint the user approved
+//   plugin-consent/<pluginKey>     what the user approved: the permissions the manifest asks for (+ release)
 //   file/<name>                    a small file in Orca's userData folder (e.g. dim-unfocused-panes.json)
 //   ui/<key>                       a display preference from Orca's UI state (status bar, zoom, sidebar filters…)
-const { hashValue } = require('./util.cjs');
+const { hashValue, stableStringify } = require('./util.cjs');
 
 const CATEGORY_OF_PREFIX = {
   settings: 'settings',
@@ -159,13 +159,70 @@ function installSourceOf(lockSource) {
 }
 
 /**
+ * Orca names a plugin `<publisher>.<id>`. A plugin folder whose manifest leaves the publisher out
+ * (manifest v2, Orca >= 1.4.246) is `local.<id>`.
+ */
+function pluginKeyOf(manifest) {
+  if (!manifest || typeof manifest.id !== 'string') return null;
+  return `${typeof manifest.publisher === 'string' && manifest.publisher ? manifest.publisher : 'local'}.${manifest.id}`;
+}
+
+// ---- approvals ----
+// Orca records an approval as a fingerprint, and the fingerprint is not portable: Orca 1.4.269
+// mixes in the plugin folder's path for dev plugins, and each Orca version normalises capabilities
+// its own way. So what we sync is what Orca's fingerprint covers, read from the manifest itself:
+// the capabilities, the execution profile, whether it has a worker, whether its code or its
+// shortcuts are bound to its content, which commands it replaces, and for an installed plugin whose
+// content is bound, which release (commit) it was. Another machine approves its own copy when that
+// copy asks for exactly the same, using its own fingerprint.
+
+const EXECUTION_LEVELS = ['data', 'declarative', 'sandboxed-ui', 'trusted-worker'];
+const listed = (contributes, kind) => Array.isArray(contributes[kind]) && contributes[kind].length > 0;
+
+/** Orca: the approval covers the plugin's code (worker, panels, editors, or a UI-or-higher execution profile). */
+function bindsCode(manifest, contributes) {
+  if (typeof manifest?.execution !== 'string') {
+    return typeof manifest?.main === 'string' || listed(contributes, 'panels') || listed(contributes, 'customEditors');
+  }
+  return EXECUTION_LEVELS.indexOf(manifest.execution) >= EXECUTION_LEVELS.indexOf('sandboxed-ui');
+}
+
+/** Orca: the approval covers what its shortcuts and VM recipes say (they run commands for you). */
+function bindsInstructions(contributes) {
+  return listed(contributes, 'keybindings') || listed(contributes, 'vmRecipes');
+}
+
+function permissionsOf(manifest) {
+  const contributes = manifest?.contributes && typeof manifest.contributes === 'object' ? manifest.contributes : {};
+  return {
+    capabilities: (Array.isArray(manifest?.capabilities) ? manifest.capabilities : []).map((c) => stableStringify(c)).sort(),
+    execution: typeof manifest?.execution === 'string' ? manifest.execution : null,
+    worker: typeof manifest?.main === 'string',
+    code: bindsCode(manifest, contributes),
+    instructions: bindsInstructions(contributes),
+    replaces: (Array.isArray(contributes.commands) ? contributes.commands : [])
+      .map((c) => c?.replaces).filter((r) => typeof r === 'string').sort(),
+  };
+}
+
+/**
+ * The synced value of an approval. `release` (git commit, or Orca's content hash) is kept only for
+ * an installed plugin whose approval Orca binds to its content; then another release needs its own
+ * approval, as in Orca. Dev folders are matched by permissions alone.
+ */
+function approvalValue(manifest, release) {
+  const p = permissionsOf(manifest);
+  return { permissions: p, release: release && (p.code || p.instructions) ? release : null };
+}
+
+/**
  * @param {object} o
- * @param {Record<string, string>} o.consents      settings.pluginConsents
  * @param {string[]} o.disabled                    settings.disabledPlugins
  * @param {Record<string, {source: object}>} o.lock plugins.lock.json `plugins`
- * @param {Array<{pluginKey: string, dir: string, hash: string | undefined}>} o.dev  dev plugin folders
+ * @param {Array<{pluginKey: string, dir: string, hash: string | undefined, own: boolean}>} o.dev  dev plugin folders
+ * @param {Array<{pluginKey: string, value: object}>} o.approvals  plugins approved for the copy installed now
  */
-function pluginItems({ consents, disabled, lock, dev }) {
+function pluginItems({ disabled, lock, dev, approvals }) {
   const items = [];
   const installed = new Set();
   for (const [key, entry] of Object.entries(lock || {})) {
@@ -179,9 +236,7 @@ function pluginItems({ consents, disabled, lock, dev }) {
   }
   const off = new Set(disabled || []);
   for (const key of [...installed].sort()) items.push(item(`plugin-enabled/${key}`, !off.has(key)));
-  for (const [key, fingerprint] of Object.entries(consents || {})) {
-    if (typeof fingerprint === 'string') items.push(item(`plugin-consent/${key}`, fingerprint));
-  }
+  for (const a of approvals || []) if (installed.has(a.pluginKey)) items.push(item(`plugin-consent/${a.pluginKey}`, a.value));
   return items;
 }
 
@@ -220,6 +275,6 @@ function toMap(items) {
 module.exports = {
   categoryOf, isSyncedSetting, settingsToItems, settingsPatch, withoutLocalParts,
   keybindingsToItems, applyKeybindingChanges, itemsToKeybindingsFile,
-  installSourceOf, pluginItems, uiToItems, UI_KEYS, item, toMap,
+  installSourceOf, pluginItems, pluginKeyOf, permissionsOf, approvalValue, uiToItems, UI_KEYS, item, toMap,
   SETTINGS_SKIP, SETTINGS_LOCAL_PARTS,
 };

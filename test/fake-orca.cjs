@@ -1,13 +1,30 @@
 'use strict';
 // An in-memory Orca with the same `ops` surface as src/engine/orca-ops.cjs, so the tests can run
 // the real adapter + sync engine for two "machines" against one bare git repo.
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { hashTree } = require('../src/engine/util.cjs');
 
-// Pretend plugin registry for git installs: url -> { pluginKey, fingerprint }
+const WORD_COUNT = { publisher: 'acme', id: 'word-count', main: 'worker.mjs', capabilities: [{ kind: 'workspace:read' }] };
+// Pretend plugin registry for git installs: url -> { pluginKey, refs: { ref -> { commit, contentHash, manifest } } }
 const GIT_REGISTRY = {
-  'https://example.com/acme/word-count.git': { pluginKey: 'acme.word-count', fingerprint: 'sha256-wordcount-v1' },
+  'https://example.com/acme/word-count.git': {
+    pluginKey: 'acme.word-count',
+    refs: {
+      'v1.0.0': { commit: 'c0ffee1', contentHash: 'wc-v1', manifest: WORD_COUNT },
+      main: { commit: 'c0ffee1', contentHash: 'wc-v1', manifest: WORD_COUNT },
+    },
+  },
 };
+
+// Like Orca 1.4.269: the approval fingerprint covers what the plugin asks for, normalised the way
+// this Orca version does it, plus where it comes from (the folder for a dev plugin, the content
+// hash for an installed one). So the same plugin has another fingerprint on another machine.
+function fakeFingerprint(orcaVersion, manifest, where) {
+  const what = JSON.stringify({ caps: manifest?.capabilities || [], main: manifest?.main || null, orcaVersion, where });
+  return `sha256-${crypto.createHash('sha256').update(what).digest('base64url').slice(0, 12)}`;
+}
 
 /**
  * @param {object} o
@@ -18,7 +35,7 @@ const GIT_REGISTRY = {
  * @param {object} [o.files]     userData files
  * @param {object} [o.ui]
  */
-function createFakeOrca({ home, settings, keybindings, lock, files, ui }) {
+function createFakeOrca({ home, settings, keybindings, lock, files, ui, orcaVersion = '1.4.222' }) {
   const state = {
     settings: structuredClone(settings),
     keybindings: keybindings ? structuredClone(keybindings) : undefined,
@@ -50,16 +67,22 @@ function createFakeOrca({ home, settings, keybindings, lock, files, ui }) {
     async readKeybindings() { return { path: path.join(home, 'keybindings.json'), file: structuredClone(state.keybindings) }; },
     async writeKeybindings(file) { state.calls.push(['writeKeybindings']); state.keybindings = structuredClone(file); },
     readLock() { return structuredClone(state.lock); },
-    readManifest: (dir) => {
-      const m = manifestOf(dir);
-      return m ? { publisher: m.publisher, id: m.id } : null;
-    },
+    readManifest: (dir) => manifestOf(dir),
+    // The fake keeps an installed plugin's manifest in its lock entry (real Orca: plugins/<key>/<hash>/).
+    readInstalledManifest: (pluginKey) => structuredClone(state.lock[pluginKey]?.manifest ?? null),
     async listPlugins() {
       const out = [];
-      for (const [key, entry] of Object.entries(state.lock)) out.push({ pluginKey: key, consentFingerprint: entry.fingerprint });
+      for (const [key, entry] of Object.entries(state.lock)) {
+        out.push({ pluginKey: key, consentFingerprint: fakeFingerprint(orcaVersion, entry.manifest, entry.contentHash) });
+      }
       for (const dir of state.settings.devPluginPaths || []) {
         const m = manifestOf(dir);
-        if (m) out.push({ pluginKey: `${m.publisher}.${m.id}`, consentFingerprint: m.fakeFingerprint });
+        const key = m ? `${m.publisher || 'local'}.${m.id}` : null;
+        if (key && !out.some((x) => x.pluginKey === key)) {
+          // Orca 1.4.269: a dev plugin that adds shortcuts is approved for its files as they are now
+          const files = m.contributes?.keybindings?.length ? hashTree(dir) : '';
+          out.push({ pluginKey: key, consentFingerprint: fakeFingerprint(orcaVersion, m, `dev-folder:${path.resolve(dir)}\0${files}`) });
+        }
       }
       return out;
     },
@@ -78,9 +101,12 @@ function createFakeOrca({ home, settings, keybindings, lock, files, ui }) {
     },
     async refreshPlugins() {},
     async installGit({ url, ref }) {
-      const reg = GIT_REGISTRY[url];
-      if (!reg) return { ok: false, error: `could not clone ${url}` };
-      state.lock[reg.pluginKey] = { pluginKey: reg.pluginKey, source: { kind: 'git', url, ref }, fingerprint: reg.fingerprint };
+      const rel = GIT_REGISTRY[url]?.refs[ref];
+      if (!rel) return { ok: false, error: `could not clone ${url}` };
+      state.lock[GIT_REGISTRY[url].pluginKey] = {
+        pluginKey: GIT_REGISTRY[url].pluginKey, source: { kind: 'git', url, ref },
+        resolvedCommit: rel.commit, contentHash: rel.contentHash, manifest: structuredClone(rel.manifest),
+      };
       return { ok: true };
     },
     async installMarketplace() { return { ok: false, error: 'not in fake' }; },
@@ -90,13 +116,22 @@ function createFakeOrca({ home, settings, keybindings, lock, files, ui }) {
     async getUi() { return structuredClone(state.ui); },
     async setUi(patch) { Object.assign(state.ui, structuredClone(patch)); },
   };
-  return { ops, state };
+  /** This machine's fingerprint for a plugin, as Orca would show it (undefined: not installed). */
+  async function fingerprintOf(pluginKey) {
+    return (await ops.listPlugins()).find((p) => p.pluginKey === pluginKey)?.consentFingerprint;
+  }
+  /** Approves a plugin the way the Plugins page does. */
+  async function approve(pluginKey) {
+    await ops.consent(pluginKey, await fingerprintOf(pluginKey));
+  }
+  return { ops, state, fingerprintOf, approve };
 }
 
-/** Writes a small dev plugin folder. */
-function writeDevPlugin(dir, { publisher = 'khoa', id, fingerprint, body = 'export default function activate() {}\n' }) {
+/** Writes a small dev plugin folder. `publisher: null` leaves it out (manifest v2: Orca names it local.<id>). */
+function writeDevPlugin(dir, { publisher = 'khoa', id, capabilities = [{ kind: 'events:subscribe' }], contributes, body = 'export default function activate() {}\n' }) {
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'orca-plugin.json'), JSON.stringify({ publisher, id, fakeFingerprint: fingerprint }, null, 2));
+  const manifest = { ...(publisher ? { publisher } : {}), id, main: 'worker.mjs', capabilities, ...(contributes ? { contributes } : {}) };
+  fs.writeFileSync(path.join(dir, 'orca-plugin.json'), JSON.stringify(manifest, null, 2));
   fs.writeFileSync(path.join(dir, 'worker.mjs'), body);
   fs.mkdirSync(path.join(dir, 'node_modules', 'x'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'node_modules', 'x', 'big.js'), '// must not be synced\n');

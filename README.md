@@ -14,7 +14,9 @@ the git login the machine already has.
 - Every sync is a git commit: **History** shows them and restores any of them.
 
 The status bar shows **Last sync 2m ago** (or Syncing…, Sync failed); click it to open the panel.
-Also `Ctrl+Alt+S` (`⌘⌥S` on macOS) and the commands **Settings Sync: Open / Sync Now**.
+The command palette also has **Settings Sync: Open / Sync Now**. There is no keyboard shortcut on
+purpose: Orca 1.4.269 asks to approve a dev plugin that adds shortcuts again after every change to
+its files.
 
 ## What is synced
 
@@ -22,7 +24,7 @@ Also `Ctrl+Alt+S` (`⌘⌥S` on macOS) and the commands **Settings Sync: Open / 
 |---|---|---|
 | Settings | Every Orca setting (theme, fonts, terminal, editor, agents, notifications…) | Accounts and tokens, agent environment variables, proxy, machine paths (workspace folder, shells, SDKs, sound files, voice models), WSL distros, device pairing, per-machine history, one-time migration flags |
 | Shortcuts | Every entry of `~/.orca/keybindings.json`, per platform | |
-| Plugins | Installed plugins (git and marketplace sources are installed on the other machine; dev-folder plugins are copied), on/off state, approvals | Approval of a copy that asks for different permissions (approve it yourself) |
+| Plugins | Installed plugins (git and marketplace sources are installed on the other machine; dev-folder plugins are copied), on/off state, approvals (see below) | Approval of a copy that asks for other permissions, or is another release (approve it yourself) |
 | UI preferences | Status bar items, zoom levels, sidebar filters and grouping, worktree card layout | Window size, sidebar widths, last opened workspace, notices already seen |
 | Plugin config files | `dim-unfocused-panes.json` by default (`extraFiles` in `config.json`) | |
 
@@ -32,6 +34,21 @@ are kept up to date. `.git`, `node_modules`, `.env*`, keys and logs are never co
 
 The repo must be **private**: it holds your settings and the code of your dev plugins.
 
+Approvals: Orca records an approval as a fingerprint that is only valid on that machine (Orca 1.4.269
+mixes in the plugin folder, and each Orca version computes it its own way). So the repo keeps what
+the fingerprint covers, read from the manifest: capabilities, execution profile, worker, whether
+its code or shortcuts are bound to its files, replaced commands, and for an installed plugin whose
+code or shortcuts are bound, its release (git commit). Another machine approves its own copy, with
+its own fingerprint, when that copy asks for exactly the same.
+
+- A plugin not installed on this machine yet: its approval and on/off state wait, without a warning,
+  and are applied once it is installed.
+- A dev plugin copy kept up to date by sync (`<userData>/settings-sync/dev-plugins/…`): when Orca asks
+  again only because its files changed (plugins that add shortcuts), sync approves it again, as long
+  as it asks for the same permissions as before.
+- Your own dev folder: sync never approves for you there; Orca asks after you change a plugin that
+  adds shortcuts.
+
 ## Set up
 
 1. Create an empty **private** repo on any git host, e.g. `orca-settings`.
@@ -39,7 +56,8 @@ The repo must be **private**: it holds your settings and the code of your dev pl
    through Git Credential Manager, or uses your SSH key).
 3. In Orca: **Settings → Plugins** → turn on the plugin system → add this folder under
    **Development plugin folder path** → approve the plugin.
-4. `Ctrl+Alt+S` → paste the repo URL → **Save**. The first machine uploads its settings.
+4. Command palette → **Settings Sync: Open** (or the status bar item **Sync: set up**) → paste the
+   repo URL → **Save**. The first machine uploads its settings.
 
 On every other machine, do steps 2–4. To get the plugin there, take it from the sync repo itself, which
 carries a copy after the first sync (PowerShell):
@@ -92,7 +110,7 @@ The engine's own files are in `<Orca userData>/settings-sync/`: `config.json`, `
 
 ## Limits
 
-- Needs `git` on PATH and Orca 1.4 (tested on 1.4.222, Windows).
+- Needs `git` on PATH and Orca 1.4 (tested on 1.4.222 and 1.4.269, Windows).
 - After an Orca restart the engine starts with the first Orca event (any agent status change) or when
   you open the panel; plugin API v1 has no "on startup" event.
 - Port 9229 held by another debugger: the engine cannot load; the worker retries a minute later.
@@ -130,4 +148,4 @@ Files in reading order (each file only uses the ones above it):
 | 13 | `worker.mjs` | Plugin worker | Loads the engine into Orca, forwards commands |
 | 14 | `src/renderer/panel.js` | Orca window | Settings Sync panel, status bar item, toasts |
 | 15–18 | `test/fake-orca.cjs`, `sync.test.mjs`, `merge.test.mjs`, `panel.test.mjs` | Node / headless Edge | Fake Orca; two machines against a bare repo; merge table; panel views |
-| | `orca-plugin.json` | Orca | Manifest: commands, `Mod+Alt+S`, events that start the worker |
+| | `orca-plugin.json` | Orca | Manifest: commands, events that start the worker |

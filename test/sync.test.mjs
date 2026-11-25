@@ -9,7 +9,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { createFakeOrca, writeDevPlugin } = require('./fake-orca.cjs');
+const { createFakeOrca, writeDevPlugin, GIT_REGISTRY } = require('./fake-orca.cjs');
 const { createAdapter } = require('../src/engine/adapter.cjs');
 const { SyncEngine } = require('../src/engine/sync.cjs');
 const { hashTree } = require('../src/engine/util.cjs');
@@ -40,20 +40,27 @@ function machine(name, init) {
 }
 
 const workDim = path.join(root, 'work-src', 'dim');
-writeDevPlugin(workDim, { id: 'dim-unfocused-panes', fingerprint: 'sha256-dim-v1' });
+// adds a shortcut, so Orca 1.4.269 asks to approve it again whenever its files change
+const DIM_ADDS = { keybindings: [{ command: 'toggle', key: 'Mod+Alt+D' }] };
+writeDevPlugin(workDim, { id: 'dim-unfocused-panes', contributes: DIM_ADDS });
+const DIM = 'khoa.dim-unfocused-panes';
 
 const work = machine('work', {
   settings: {
     terminalFontSize: 14, theme: 'dark', workspaceDir: 'G:\\ws', claudeManagedAccounts: [{ id: 'secret-account' }],
     agentDefaultEnv: { goose: { API_KEY: 'secret' } }, pluginSystemEnabled: true, devPluginPaths: [workDim],
-    pluginConsents: { 'khoa.dim-unfocused-panes': 'sha256-dim-v1' }, disabledPlugins: [],
+    // an approval left behind by a plugin removed since: not synced
+    pluginConsents: { 'local.dev-services': 'sha256-removed-plugin' }, disabledPlugins: [],
     notifications: { enabled: true, customSoundPath: 'C:\\work.wav' }, agentYoloDefaultsMigrated: true,
   },
   keybindings: { version: 1, keybindings: {}, platforms: { win32: { 'worktree.palette': ['Mod+Shift+P'] } } },
   files: { 'dim-unfocused-panes.json': '{\n  "amount": 0.6\n}\n' },
   ui: { statusBarVisible: false, sidebarWidth: 300, uiZoomLevel: 1 },
+  orcaVersion: '1.4.222',
 });
+await work.fake.approve(DIM);
 
+// A newer Orca at home: it fingerprints plugins differently, and the dim plugin lives in another folder.
 const home = machine('home', {
   settings: {
     terminalFontSize: 12, theme: 'light', workspaceDir: 'D:\\code', claudeManagedAccounts: [], pluginSystemEnabled: false,
@@ -61,6 +68,7 @@ const home = machine('home', {
     agentYoloDefaultsMigrated: false, homeOnlySetting: 'kept',
   },
   ui: { statusBarVisible: true, sidebarWidth: 500, uiZoomLevel: 0 },
+  orcaVersion: '1.4.269',
 });
 
 const repoFile = (rel) => execFileSync('git', ['--git-dir', bare, 'show', `main:${rel}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
@@ -81,7 +89,11 @@ test('work machine: first sync pushes everything except secrets and machine-only
   assert.equal(settings.devPluginPaths, undefined);
   const plugins = JSON.parse(repoFile('plugins.json'));
   assert.equal(plugins['khoa.dim-unfocused-panes'].source.kind, 'dev');
-  assert.equal(plugins['khoa.dim-unfocused-panes'].consent, 'sha256-dim-v1');
+  assert.deepEqual(plugins[DIM].consent, {
+    permissions: { capabilities: ['{"kind":"events:subscribe"}'], execution: null, worker: true, code: true, instructions: true, replaces: [] },
+    release: null,
+  }, 'what was approved, not the Orca fingerprint');
+  assert.equal(plugins['local.dev-services'], undefined, 'approval of a removed plugin not synced');
   assert.equal(plugins['khoa.dim-unfocused-panes'].enabled, true);
   assert.ok(repoHas('dev-plugins/khoa.dim-unfocused-panes/worker.mjs'));
   assert.ok(!repoHas('dev-plugins/khoa.dim-unfocused-panes/.env'), '.env never copied');
@@ -112,8 +124,10 @@ test('home machine: first sync makes it look like work, keeps its own paths and 
   const managed = path.join(home.dataDir, 'dev-plugins', 'khoa.dim-unfocused-panes');
   assert.deepEqual(s.devPluginPaths, [managed]);
   assert.equal(hashTree(managed), hashTree(workDim));
-  assert.equal(s.pluginConsents['khoa.dim-unfocused-panes'], 'sha256-dim-v1');
-  assert.ok(!s.disabledPlugins.includes('khoa.dim-unfocused-panes'));
+  const homeFp = await home.fake.fingerprintOf(DIM);
+  assert.notEqual(homeFp, await work.fake.fingerprintOf(DIM), 'each Orca fingerprints it differently');
+  assert.equal(s.pluginConsents[DIM], homeFp, 'approved with home\'s own fingerprint');
+  assert.ok(!s.disabledPlugins.includes(DIM));
   // a home-only setting goes up to the repo
   assert.ok(r.pushed.includes('settings/homeOnlySetting'));
   assert.equal(r.conflicts.every((c) => c.winner === 'remote' && c.firstSync), true);
@@ -193,6 +207,15 @@ test('editing a dev plugin on work updates the copy on home', async () => {
   assert.ok(r.applied.includes('plugin-source/khoa.dim-unfocused-panes'));
   const managed = path.join(home.dataDir, 'dev-plugins', 'khoa.dim-unfocused-panes');
   assert.match(fs.readFileSync(path.join(managed, 'worker.mjs'), 'utf8'), /v2/);
+  // new files: Orca asks again on both machines. Home's copy is kept by sync: approved again by itself.
+  assert.equal(home.s().pluginConsents[DIM], await home.fake.fingerprintOf(DIM), 'home approved the new files');
+  assert.notEqual(work.s().pluginConsents[DIM], await work.fake.fingerprintOf(DIM), 'work (own folder) leaves it to Orca');
+  assert.ok(!r.pushed.includes(`plugin-consent/${DIM}`), 'no approval change pushed from home');
+  const w = await work.sync();
+  assert.deepEqual([w.pushed, w.applied], [[], []], 'work does not push the approval away while Orca asks again');
+  await work.fake.approve(DIM); // the developer approves it in Orca
+  const w2 = await work.sync();
+  assert.deepEqual([w2.pushed, w2.applied], [[], []]);
 });
 
 test('a value Orca normalises does not bounce between machines', async () => {
@@ -228,12 +251,83 @@ test('disabling a plugin on one machine disables it on the other', async () => {
 test('git plugins are installed, approved and enabled on the other machine', async () => {
   const url = 'https://example.com/acme/word-count.git';
   await work.fake.ops.installGit({ url, ref: 'v1.0.0' });
-  await work.fake.ops.consent('acme.word-count', 'sha256-wordcount-v1');
+  await work.fake.approve('acme.word-count');
   await work.sync();
   const r = await home.sync();
   assert.equal(r.failed.length, 0, JSON.stringify(r.failed));
   assert.equal(home.fake.state.lock['acme.word-count'].source.ref, 'v1.0.0');
-  assert.equal(home.s().pluginConsents['acme.word-count'], 'sha256-wordcount-v1');
+  assert.equal(home.s().pluginConsents['acme.word-count'], await home.fake.fingerprintOf('acme.word-count'));
+  assert.equal(JSON.parse(repoFile('plugins.json'))['acme.word-count'].consent.release, 'c0ffee1');
+});
+
+test('a git plugin that installs as another release is not approved by itself', async () => {
+  const url = 'https://example.com/acme/todo.git';
+  const manifest = { publisher: 'acme', id: 'todo', main: 'worker.mjs', capabilities: [] };
+  GIT_REGISTRY[url] = { pluginKey: 'acme.todo', refs: { main: { commit: 'aaa1', contentHash: 'todo-1', manifest } } };
+  await work.fake.ops.installGit({ url, ref: 'main' });
+  await work.fake.approve('acme.todo');
+  await work.sync();
+  GIT_REGISTRY[url].refs.main = { commit: 'bbb2', contentHash: 'todo-2', manifest }; // the branch moved on meanwhile
+  const r = await home.sync();
+  assert.equal(home.fake.state.lock['acme.todo'].resolvedCommit, 'bbb2');
+  const f = r.failed.find((x) => x.id === 'plugin-consent/acme.todo');
+  assert.match(f?.message ?? '', /different release/);
+  assert.equal(home.s().pluginConsents['acme.todo'], undefined);
+  await home.fake.approve('acme.todo'); // the user reviews it in Settings → Plugins
+  const r2 = await home.sync();
+  assert.deepEqual(r2.failed, [], 'the warning goes away');
+  const r3 = await work.sync();
+  assert.deepEqual(r3.failed, []);
+  assert.equal(work.fake.state.lock['acme.todo'].resolvedCommit, 'aaa1', 'work keeps its approved copy');
+});
+
+test('a plugin not installed here waits quietly and is approved once it is there', async () => {
+  // a theme plugin bundled with work's Orca, which home's Orca does not ship yet
+  const entry = (contentHash) => ({
+    pluginKey: 'stablyai.night-theme', source: { kind: 'bundled', bundleId: 'stablyai.night-theme' }, resolvedCommit: null,
+    contentHash, manifest: { publisher: 'stablyai', id: 'night-theme', contributes: { themes: [{ id: 'night' }], terminalThemes: [{ id: 'night' }] } },
+  });
+  work.fake.state.lock['stablyai.night-theme'] = entry('night-1');
+  await work.fake.approve('stablyai.night-theme');
+  await work.sync();
+  const r1 = await home.sync();
+  assert.deepEqual(r1.failed, [], 'nothing for the user to do');
+  assert.deepEqual(r1.waiting.map((w) => w.id).sort(), ['plugin-consent/stablyai.night-theme', 'plugin-enabled/stablyai.night-theme']);
+  home.fake.state.lock['stablyai.night-theme'] = entry('night-2'); // home's Orca updated: ships it too
+  const r2 = await home.sync();
+  assert.deepEqual(r2.failed, []);
+  assert.ok(r2.applied.includes('plugin-consent/stablyai.night-theme'), JSON.stringify(r2));
+  assert.equal(home.s().pluginConsents['stablyai.night-theme'], await home.fake.fingerprintOf('stablyai.night-theme'));
+  const r3 = await home.sync();
+  assert.deepEqual([r3.applied, r3.pushed, r3.waiting], [[], [], []], 'settled');
+});
+
+test('a dev plugin whose manifest has no publisher (local.<id>) is copied and approved', async () => {
+  const pm2 = path.join(root, 'work-src', 'pm2');
+  writeDevPlugin(pm2, { publisher: null, id: 'pm2-local-services', capabilities: [] });
+  work.s().devPluginPaths = [...work.s().devPluginPaths, pm2];
+  await work.fake.approve('local.pm2-local-services');
+  await work.sync();
+  const r = await home.sync();
+  assert.deepEqual(r.failed, []);
+  const managed = path.join(home.dataDir, 'dev-plugins', 'local.pm2-local-services');
+  assert.ok(home.s().devPluginPaths.includes(managed));
+  assert.equal(home.s().pluginConsents['local.pm2-local-services'], await home.fake.fingerprintOf('local.pm2-local-services'));
+});
+
+test('an approval written by Settings Sync 0.2 (a bare fingerprint) is used only where it matches', async () => {
+  const { createAdapter } = require('../src/engine/adapter.cjs');
+  const box = createFakeOrca({ home: path.join(root, 'old-format'), settings: { devPluginPaths: [], pluginConsents: {}, disabledPlugins: [] } });
+  const dir = path.join(root, 'old-format', 'p');
+  writeDevPlugin(dir, { id: 'p' });
+  box.state.settings.devPluginPaths = [dir];
+  const adapter = createAdapter(box.ops, { managedDevRoot: path.join(root, 'old-format', 'managed') });
+  const other = await adapter.apply([{ id: 'plugin-consent/khoa.p', item: { value: 'sha256-from-another-machine' } }]);
+  assert.equal(other.failed.get('plugin-consent/khoa.p')?.quiet, true, 'waits for the other machine to sync with 0.3');
+  assert.equal(box.state.settings.pluginConsents['khoa.p'], undefined);
+  const same = await adapter.apply([{ id: 'plugin-consent/khoa.p', item: { value: await box.fingerprintOf('khoa.p') } }]);
+  assert.equal(same.failed.size, 0);
+  assert.equal(box.state.settings.pluginConsents['khoa.p'], await box.fingerprintOf('khoa.p'));
 });
 
 test('a plugin that fails to install is retried and never removed from the repo', async () => {
@@ -281,7 +375,7 @@ test('a machine developing the same plugin from its own folder keeps its files',
     settings: { pluginSystemEnabled: true, devPluginPaths: [], pluginConsents: {}, disabledPlugins: [] },
   });
   const ownDim = path.join(root, 'laptop-src', 'dim');
-  writeDevPlugin(ownDim, { id: 'dim-unfocused-panes', fingerprint: 'sha256-dim-v1', body: '// laptop version\n' });
+  writeDevPlugin(ownDim, { id: 'dim-unfocused-panes', contributes: DIM_ADDS, body: '// laptop version\n' });
   third.s().devPluginPaths = [ownDim];
   const r1 = await third.sync();
   assert.ok(r1.skipped.includes('plugin-source/khoa.dim-unfocused-panes'));
@@ -289,6 +383,20 @@ test('a machine developing the same plugin from its own folder keeps its files',
   const r2 = await third.sync();
   assert.deepEqual(r2.pushed, [], 'no ping-pong for its own plugin');
   assert.deepEqual(r2.applied, []);
+  assert.equal(third.s().pluginConsents[DIM], await third.fake.fingerprintOf(DIM), 'its own copy asks for the same: approved');
+});
+
+test('a copy that asks for other permissions than the one approved is left for the user', async () => {
+  const fourth = machine('desktop', {
+    settings: { pluginSystemEnabled: true, devPluginPaths: [], pluginConsents: {}, disabledPlugins: [] },
+  });
+  const ownDim = path.join(root, 'desktop-src', 'dim');
+  writeDevPlugin(ownDim, { id: 'dim-unfocused-panes', contributes: DIM_ADDS, capabilities: [{ kind: 'events:subscribe' }, { kind: 'secrets:own' }] });
+  fourth.s().devPluginPaths = [ownDim];
+  const r = await fourth.sync();
+  const f = r.failed.find((x) => x.id === `plugin-consent/${DIM}`);
+  assert.match(f?.message ?? '', /different permissions/);
+  assert.equal(fourth.s().pluginConsents[DIM], undefined);
 });
 
 test('offline: sync reports it and keeps the pending change, stamped when it was made', async () => {
@@ -351,6 +459,28 @@ test('joining with "use the repo\'s settings" takes the repo values', async () =
   kiosk.engine.chooseFirstSync('remote');
   await kiosk.sync();
   assert.equal(kiosk.s().terminalFontSize, 30);
+});
+
+test('an approval dropped by Settings Sync 0.2 rewriting plugins.json is put back', async () => {
+  await work.sync();
+  await home.sync();
+  // what 0.2 does when it pushes: rewrites plugins.json from the items it can read, no deletion record
+  const clone = path.join(root, 'old-engine');
+  execFileSync('git', ['clone', '-q', '-b', 'main', bare, clone]);
+  const plugins = JSON.parse(fs.readFileSync(path.join(clone, 'plugins.json'), 'utf8'));
+  delete plugins[DIM].consent;
+  fs.writeFileSync(path.join(clone, 'plugins.json'), JSON.stringify(plugins, null, 2));
+  const meta = JSON.parse(fs.readFileSync(path.join(clone, 'meta.json'), 'utf8'));
+  delete meta.stamps[`plugin-consent/${DIM}`];
+  fs.writeFileSync(path.join(clone, 'meta.json'), JSON.stringify(meta, null, 2));
+  const git = (...a) => execFileSync('git', ['-C', clone, '-c', 'user.name=old', '-c', 'user.email=old@x', ...a]);
+  git('commit', '-qam', 'home (0.2): 1 change');
+  git('push', '-q', 'origin', 'HEAD:main');
+  const r = await work.sync();
+  assert.ok(r.pushed.includes(`plugin-consent/${DIM}`), JSON.stringify(r.pushed));
+  assert.ok(JSON.parse(repoFile('plugins.json'))[DIM].consent.permissions);
+  const again = await home.sync();
+  assert.deepEqual([again.failed, again.waiting], [[], []]);
 });
 
 test('history lists the sync commits', async () => {

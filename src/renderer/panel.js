@@ -12,8 +12,6 @@
   }
 
   const send = (op, extra) => console.debug(CHANNEL + JSON.stringify({ op, ...extra }));
-  const isMac = /Mac/i.test(navigator.platform);
-  const SHORTCUT = isMac ? '⌘⌥S' : 'Ctrl+Alt+S';
 
   const h = (tag, style, props, children) => {
     const node = document.createElement(tag);
@@ -236,7 +234,7 @@
       display: 'flex', justifyContent: 'space-between', marginTop: '10px', paddingTop: '8px',
       borderTop: '1px solid var(--border, #333)', fontSize: '11px',
     }, null, [
-      text(`${SHORTCUT} opens this · v${VERSION}`, muted),
+      text(`Settings Sync v${VERSION}`, muted),
       button('Log', () => send('openLog'), { border: 'none', padding: '0 4px', fontSize: '11px', opacity: '0.7' }),
     ]));
     return nodes;
@@ -440,7 +438,7 @@
       cfg.repoUrl ? `Repo: ${cfg.repoUrl}` : 'No sync repo yet',
       cfg.machineName ? `This machine: ${cfg.machineName}` : null,
       ls ? `Last sync: ${new Date(ls.at).toLocaleString()}${ls.ok ? ` · ↓${ls.applied.length} ↑${ls.pushed.length}` : ` · ${ls.error}`}` : null,
-      `Click to open (${SHORTCUT})`,
+      'Click to open',
     ].filter(Boolean).join('\n');
   }
 

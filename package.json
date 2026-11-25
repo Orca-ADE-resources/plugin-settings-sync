@@ -1,6 +1,6 @@
 {
   "name": "orca-settings-sync",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Orca plugin: sync settings, shortcuts, plugins and UI preferences between machines through a private git repo.",
   "scripts": {

@@ -129,7 +129,7 @@ function install(opts) {
       result = { ok: false, error: err.message, applied: [], pushed: [], conflicts: [], failed: [] };
       log(`sync crashed: ${err.stack || err.message}`);
     }
-    log(`sync (${reason}): ${result.ok ? 'ok' : `error: ${result.error}`} applied=${result.applied.length} pushed=${result.pushed.length} conflicts=${result.conflicts.length} failed=${result.failed.length}${result.awaitingChoice ? ' (waiting for first-sync choice)' : ''}`);
+    log(`sync (${reason}): ${result.ok ? 'ok' : `error: ${result.error}`} applied=${result.applied.length} pushed=${result.pushed.length} conflicts=${result.conflicts.length} failed=${result.failed.length} waiting=${result.waiting?.length ?? 0}${result.awaitingChoice ? ' (waiting for first-sync choice)' : ''}`);
     if (result.awaitingChoice) {
       // The repo already has settings from other machines: ask before changing anything.
       const wc = targetWindow();

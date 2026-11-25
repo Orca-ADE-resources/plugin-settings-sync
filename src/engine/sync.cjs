@@ -4,8 +4,9 @@
 // between, start again from the fetch (up to 3 times).
 //
 // The engine does not know Orca: everything Orca-specific goes through the adapter
-//   adapter.readLocal(config)          -> Promise<Map<id, item>>
-//   adapter.apply(changes, config)     -> Promise<{ failed: Map<id, {message, retry}>, skipped: Set<id> }>
+//   adapter.readLocal(config, { lastLocal }) -> Promise<Map<id, item>>
+//   adapter.apply(changes, config)     -> Promise<{ failed: Map<id, {message, retry, quiet?}>, skipped: Set<id> }>
+//                                         quiet = nothing for the user to do (e.g. plugin not installed yet): goes to `waiting`
 // so the tests can run two fake machines against a bare repo.
 const os = require('node:os');
 const path = require('node:path');
@@ -139,11 +140,11 @@ class SyncEngine {
     if (!cfg.repoUrl) return this.finish(state, { ok: false, error: 'No sync repo set. Open Settings Sync and paste a private git repo URL.', reason, startedAt });
 
     // 1. This machine, and when each not-yet-synced change was first seen.
-    let local = filterIncluded(await this.adapter.readLocal(cfg), cfg);
+    let local = filterIncluded(await this.adapter.readLocal(cfg, { lastLocal: state.lastLocal }), cfg);
     stampLocalChanges(local, pick(state.lastLocal, cfg), state.localStamps, startedAt);
     this.saveState(state);
 
-    const result = { ok: true, reason, startedAt, applied: [], pushed: [], conflicts: [], failed: [], skipped: [], commit: null, remoteCommit: null };
+    const result = { ok: true, reason, startedAt, applied: [], pushed: [], conflicts: [], failed: [], waiting: [], skipped: [], commit: null, remoteCommit: null };
     try {
       await this.git.prepare(cfg.repoUrl, cfg.branch);
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -162,6 +163,14 @@ class SyncEngine {
         }
         const remote = filterIncluded(remoteAll, cfg);
         const stamps = { ...repo.stamps };
+        // Settings Sync 0.2 rewrites plugins.json without the approvals it cannot read, and leaves
+        // no deletion record: put this machine's approval back instead of following that.
+        for (const id of local.keys()) {
+          if (id.startsWith('plugin-consent/') && !remote.has(id) && !stamps[id] && state.lastRemote[id] !== undefined) {
+            delete state.lastRemote[id];
+            delete state.lastLocal[id];
+          }
+        }
 
         // 3. Decide.
         const retry = new Set(state.retry);
@@ -177,7 +186,7 @@ class SyncEngine {
         if (toApply.length) {
           const changes = toApply.map((d) => ({ id: d.id, item: remote.get(d.id) }));
           const { failed, skipped } = await this.adapter.apply(changes, cfg);
-          local = filterIncluded(await this.adapter.readLocal(cfg), cfg);
+          local = filterIncluded(await this.adapter.readLocal(cfg, { lastLocal: state.lastLocal }), cfg);
           for (const d of toApply) {
             state.lastLocal[d.id] = local.get(d.id)?.h;
             state.lastRemote[d.id] = remote.get(d.id)?.h;
@@ -186,7 +195,8 @@ class SyncEngine {
             delete state.localStamps[d.id];
             const f = failed.get(d.id);
             if (f) {
-              if (!result.failed.some((x) => x.id === d.id)) result.failed.push({ id: d.id, message: f.message });
+              const list = f.quiet ? result.waiting : result.failed;
+              if (!list.some((x) => x.id === d.id)) list.push({ id: d.id, message: f.message });
               if (f.retry) retry.add(d.id); else retry.delete(d.id);
             } else {
               retry.delete(d.id);
@@ -302,7 +312,8 @@ class SyncEngine {
     const changes = await this.restoreChanges(commit);
     const { failed } = await this.adapter.apply(changes, this.config());
     const result = await this.sync(`restore ${commit.slice(0, 7)}`);
-    return { ...result, restored: changes.map((c) => c.id), restoreFailed: [...failed].map(([id, f]) => ({ id, message: f.message })) };
+    const restoreFailed = [...failed].filter(([, f]) => !f.quiet).map(([id, f]) => ({ id, message: f.message }));
+    return { ...result, restored: changes.map((c) => c.id), restoreFailed };
   }
 }
 
@@ -318,6 +329,7 @@ function combineResults(a, b) {
     skipped: ids(a.skipped, b.skipped),
     conflicts: byId(a.conflicts, b.conflicts),
     failed: b.ok ? byId([], b.failed) : byId(a.failed, b.failed),
+    waiting: b.ok ? byId([], b.waiting) : byId(a.waiting, b.waiting),
     commit: b.commit ?? a.commit,
   };
 }
@@ -352,7 +364,7 @@ function summarize(r) {
     ok: r.ok, error: r.error ?? null, reason: r.reason, at: r.finishedAt, tookMs: r.finishedAt - r.startedAt,
     awaitingChoice: Boolean(r.awaitingChoice),
     applied: r.applied ?? [], pushed: r.pushed ?? [], conflicts: r.conflicts ?? [], failed: r.failed ?? [],
-    skipped: r.skipped ?? [], commit: r.commit ?? null, remoteCommit: r.remoteCommit ?? null,
+    waiting: r.waiting ?? [], skipped: r.skipped ?? [], commit: r.commit ?? null, remoteCommit: r.remoteCommit ?? null,
   };
 }
 
